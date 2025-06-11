@@ -5,77 +5,58 @@ from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 import numpy as np
 import time
-import signal
-import os
 
-class MirrorWindow(tk.Toplevel):
-    def __init__(self, master, serial, scale=0.5):
-        super().__init__(master)
+FFMPEG_PATH = "ffmpeg"  # Change to absolute path if needed (e.g., "ffmpeg.exe")
+
+class SmoothMirror(tk.Toplevel):
+    def __init__(self, serial, width=1080, height=1920, scale=0.5):
+        super().__init__()
         self.serial = serial
-        self.scale = scale
-        self.stop_event = threading.Event()
         self.title(f"HopeMirror – {serial}")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.resizable(False, False)
 
-        self.adb_proc = None
-        self.ffmpeg_proc = None
+        self.dev_w, self.dev_h = width, height
+        self.scale = scale
+        self.win_w, self.win_h = int(width * scale), int(height * scale)
 
-        # Get device resolution
-        w, h = self.get_device_size()
-        self.dev_w, self.dev_h = w, h
-        self.win_w, self.win_h = int(w * scale), int(h * scale)
-
-        # Canvas for video
-        self.canvas = tk.Canvas(self, width=self.win_w, height=self.win_h)
-        self.canvas.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(self, width=self.win_w, height=self.win_h, bg="black")
+        self.canvas.pack()
         self.img_id = self.canvas.create_image(0, 0, anchor="nw", image=None)
         self.photo = None
 
-        # Start streaming thread
-        threading.Thread(target=self.stream_loop, daemon=True).start()
+        self.stop_event = threading.Event()
+        self.adb_proc = None
+        self.ffmpeg_proc = None
 
-        # Bind touch events
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<ButtonPress-1>", self.drag_start)
         self.canvas.bind("<ButtonRelease-1>", self.drag_end)
 
-    def get_device_size(self):
-        try:
-            out = subprocess.check_output(
-                ["adb", "-s", self.serial, "shell", "wm", "size"],
-                universal_newlines=True
-            )
-            for token in out.split():
-                if "x" in token:
-                    w, h = token.split("x")
-                    return int(w), int(h)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to get device size: {e}")
-        return 1080, 1920  # fallback
+        threading.Thread(target=self.stream_loop, daemon=True).start()
 
     def stream_loop(self):
-        frame_bytes = self.dev_w * self.dev_h * 3
+        frame_size = self.dev_w * self.dev_h * 3
         try:
-            adb_cmd = ["adb", "-s", self.serial, "exec-out",
-                       "screenrecord", "--output-format=h264", "-"]
-            ffmpeg_cmd = ["ffmpeg", "-f", "h264", "-i", "pipe:0",
-                          "-f", "rawvideo", "-pix_fmt", "rgb24",
-                          "-video_size", f"{self.dev_w}x{self.dev_h}", "pipe:1"]
+            adb_cmd = ["adb", "-s", self.serial, "exec-out", "screenrecord", "--output-format=h264", "-"]
+            ffmpeg_cmd = [
+                FFMPEG_PATH,
+                "-f", "h264", "-i", "pipe:0",
+                "-f", "rawvideo", "-pix_fmt", "rgb24",
+                "-video_size", f"{self.dev_w}x{self.dev_h}",
+                "pipe:1"
+            ]
 
             self.adb_proc = subprocess.Popen(adb_cmd, stdout=subprocess.PIPE)
-            self.ffmpeg_proc = subprocess.Popen(ffmpeg_cmd,
-                                                stdin=self.adb_proc.stdout,
-                                                stdout=subprocess.PIPE,
-                                                stderr=subprocess.DEVNULL,
+            self.ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=self.adb_proc.stdout,
+                                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                                 bufsize=10**8)
 
             while not self.stop_event.is_set():
-                raw = self.ffmpeg_proc.stdout.read(frame_bytes)
-                if not raw or len(raw) < frame_bytes:
+                raw = self.ffmpeg_proc.stdout.read(frame_size)
+                if not raw or len(raw) < frame_size:
                     time.sleep(0.01)
                     continue
-
                 try:
                     frame = np.frombuffer(raw, dtype=np.uint8).reshape((self.dev_h, self.dev_w, 3))
                     img = Image.fromarray(frame)
@@ -83,10 +64,11 @@ class MirrorWindow(tk.Toplevel):
                         img = img.resize((self.win_w, self.win_h), Image.BILINEAR)
                     self.photo = ImageTk.PhotoImage(img)
                     self.after(0, lambda: self.canvas.itemconfig(self.img_id, image=self.photo))
-                except Exception as e:
-                    print("Frame error:", e)
+                except Exception:
                     continue
 
+        except FileNotFoundError:
+            messagebox.showerror("FFmpeg Error", f"FFmpeg not found: {FFMPEG_PATH}")
         except Exception as e:
             messagebox.showerror("Stream Error", str(e))
 
@@ -94,8 +76,8 @@ class MirrorWindow(tk.Toplevel):
         return int(x / self.scale), int(y / self.scale)
 
     def on_click(self, ev):
-        dx, dy = self.map_coords(ev.x, ev.y)
-        subprocess.Popen(["adb", "-s", self.serial, "shell", "input", "tap", str(dx), str(dy)])
+        x, y = self.map_coords(ev.x, ev.y)
+        subprocess.Popen(["adb", "-s", self.serial, "shell", "input", "tap", str(x), str(y)])
 
     def drag_start(self, ev):
         self._x0, self._y0 = ev.x, ev.y
@@ -103,8 +85,10 @@ class MirrorWindow(tk.Toplevel):
     def drag_end(self, ev):
         x1, y1 = self.map_coords(self._x0, self._y0)
         x2, y2 = self.map_coords(ev.x, ev.y)
-        subprocess.Popen(["adb", "-s", self.serial, "shell", "input", "swipe",
-                          str(x1), str(y1), str(x2), str(y2), "200"])
+        subprocess.Popen([
+            "adb", "-s", self.serial, "shell", "input", "swipe",
+            str(x1), str(y1), str(x2), str(y2), "200"
+        ])
 
     def on_close(self):
         self.stop_event.set()
@@ -119,11 +103,11 @@ class DeviceSelector(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("HopeMirror Launcher")
-        self.geometry("320x440")
+        self.geometry("320x420")
         self.resizable(False, False)
 
-        tk.Label(self, text="Connected Devices:", font=("Helvetica", 13)).pack(pady=8)
-        self.device_list = tk.Listbox(self, selectmode="extended", height=15)
+        tk.Label(self, text="Connected Devices", font=("Helvetica", 13)).pack(pady=10)
+        self.device_list = tk.Listbox(self, selectmode="extended", height=12)
         self.device_list.pack(fill="both", expand=True, padx=15)
 
         btn_frame = tk.Frame(self)
@@ -145,14 +129,26 @@ class DeviceSelector(tk.Tk):
             messagebox.showerror("ADB Error", f"Could not list devices:\n{e}")
 
     def stream_selected(self):
-        sel = self.device_list.curselection()
-        if not sel:
-            messagebox.showinfo("No Device", "Please select at least one device.")
+        selection = self.device_list.curselection()
+        if not selection:
+            messagebox.showinfo("No Selection", "Please select at least one device.")
             return
-        for i in sel:
-            serial = self.device_list.get(i)
-            MirrorWindow(self, serial, scale=0.5)
 
+        for i in selection:
+            serial = self.device_list.get(i)
+            try:
+                w, h = self.get_device_resolution(serial)
+                SmoothMirror(serial, width=w, height=h, scale=0.5)
+            except Exception as e:
+                messagebox.showerror("Device Error", str(e))
+
+    def get_device_resolution(self, serial):
+        out = subprocess.check_output(["adb", "-s", serial, "shell", "wm", "size"], universal_newlines=True)
+        for part in out.split():
+            if "x" in part:
+                w, h = part.split("x")
+                return int(w), int(h)
+        return 1080, 1920  # fallback
 
 if __name__ == "__main__":
     DeviceSelector().mainloop()
