@@ -99,5 +99,34 @@ class DeviceStreamer(tk.Tk):
         except:
             pass
 
+
+
+def stream_loop(self):
+    while not self.stop_event.is_set():
+        try:
+            img_data = subprocess.check_output(
+                ["adb", "-s", self.serial, "exec-out", "screencap", "-p"],
+                stderr=subprocess.DEVNULL
+            )
+            img = Image.open(io.BytesIO(img_data))
+
+            # ✅ Update device and window sizes if screen rotated
+            new_w, new_h = img.size
+            if (new_w, new_h) != (self.dev_w, self.dev_h):
+                self.dev_w, self.dev_h = new_w, new_h
+                self.win_w = int(new_w * self.scale)
+                self.win_h = int(new_h * self.scale)
+                self.canvas.config(width=self.win_w, height=self.win_h)
+
+            # ✅ Resize and show image
+            img = img.resize((self.win_w, self.win_h), Image.BILINEAR)
+            self.photo = ImageTk.PhotoImage(img)
+            self.after(0, lambda: self.canvas.itemconfig(self.img_id, image=self.photo))
+
+        except Exception as e:
+            print(f"[{self.serial}] Screenshot error:", e)
+
+        time.sleep(0.08)  # ~12 FPS
+
 if __name__ == "__main__":
     DeviceStreamer(scale=0.6).mainloop()
